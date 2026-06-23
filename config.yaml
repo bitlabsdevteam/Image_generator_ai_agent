@@ -1,0 +1,49 @@
+# Central configuration for the semi-3D-anime image generation agent.
+# Read by both the MCP server and the agent harness.
+
+image:
+  # Model registry. Default is SD1.5 DreamShaper-8 — best style/speed match for the
+  # reference samples on an M1 Pro (32GB) via diffusers + MPS (fp16).
+  default_model: dreamshaper-8
+  models:
+    dreamshaper-8:
+      repo: Lykon/dreamshaper-8        # HuggingFace-hosted; loads via diffusers.from_pretrained
+      arch: sd15
+    dreamshaper-xl:                     # optional higher-fidelity 1024px (slower, ~7GB)
+      repo: Lykon/dreamshaper-xl-v2-turbo
+      arch: sdxl
+
+  device: mps          # "mps" on Apple Silicon, "cpu" fallback, "cuda" if available
+  # float32 on MPS: fp16 SD1.5 VAE produces NaNs/black images on Metal. fp32 is reliable
+  # on a 32GB M1 (~50-70s/image at these settings). Set float16 only if your model is stable.
+  dtype: float32
+  # Demo-friendly defaults: ~20-40s/image on M1 Pro.
+  steps: 25
+  guidance_scale: 7.0
+  width: 768
+  height: 512          # banner-ish aspect, close to the sample lineup
+  seed: -1             # -1 = random each run
+
+llm:
+  provider: ollama
+  model: qwen3.5:4b    # lightweight, already pulled; configurable
+  temperature: 0.7
+  # Used by enhance_prompt / refine_prompt and the optional vision judge.
+  vision_model: gemma4:12b
+
+evals:
+  # Loop gate thresholds (0..1). Generation is accepted when both are met.
+  # Calibrated for open_clip ViT-B/32 raw cosine: image-text alignment rarely exceeds
+  # ~0.30 even for strong matches (lower still for stylized art), so 0.21 is a realistic bar.
+  clip_threshold: 0.21
+  # The reference samples are tight character-group portraits, so wider scenes score lower
+  # on style similarity; ~0.42 is a meaningful, achievable bar for full-scene prompts.
+  style_threshold: 0.42
+  enable_vision_judge: false   # off by default — slow on the loop path
+
+loop:
+  max_iters: 3         # generate -> evaluate -> refine, up to N times
+
+paths:
+  outputs: outputs
+  samples: images      # reference images for style-similarity eval

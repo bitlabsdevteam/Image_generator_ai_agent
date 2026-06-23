@@ -1,0 +1,18 @@
+# ML / image-generation stack — install under a Python 3.12 venv (system 3.14 has no torch wheels).
+# Pinned loosely; exact patch versions resolved by pip for arm64 / MPS.
+
+torch>=2.2          # MPS (Metal) backend for Apple Silicon
+diffusers>=0.27     # Stable Diffusion pipelines
+transformers>=4.38  # text encoders / tokenizers used by diffusers
+accelerate>=0.27    # required by diffusers (per assessment)
+safetensors>=0.4
+open_clip_torch>=2.24  # CLIP evals (prompt alignment + style similarity)
+
+# Agent harness
+ollama>=0.3         # local LLM client (qwen3.5:4b etc.)
+mcp>=1.2            # Model Context Protocol server/client (FastMCP)
+
+# Utilities
+pyyaml>=6.0
+pillow>=10.0
+numpy>=1.26

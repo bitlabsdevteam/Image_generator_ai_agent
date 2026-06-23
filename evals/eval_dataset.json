@@ -1,0 +1,11 @@
+{
+  "style": "semi-3d-anime",
+  "thresholds": { "clip_score": 0.25, "style_sim": 0.55 },
+  "prompts": [
+    "American teenagers having fun at a party",
+    "a cheerful girl with pink hair waving, character portrait",
+    "two friends playing video games on a couch",
+    "a young chef presenting a dish in a bright kitchen",
+    "a group of students hanging out in a school courtyard"
+  ]
+}

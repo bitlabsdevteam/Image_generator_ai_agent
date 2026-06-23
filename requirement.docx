@@ -1,0 +1,40 @@
+
+
+■Skill Assessment
+<Task>
+1. Create an AI tool which generates images based on the prompt provided.
+2. Demonstrate how the tool works during the next session.
+
+<Prompt>
+"American teenagers having fun at a party."
+
+<Art Style>
+Semi-3D Anime style. Please see the attachments for the reference.
+
+■Preparation
+1. Core Requirements
+Python: Version 3.8 or higher is required.
+
+Hardware Note: While a GPU is preferred for performance, you can run the tasks on a CPU by using quantized models or low-resolution settings.
+
+2. Local LLM Setup
+Please ensure you have a local LLM environment ready. You can choose one of the following options:
+
+Option A (Ollama): Install Ollama and pre-pull a lightweight model.
+
+Recommended: llama3.2 or phi3.
+
+Option B (Transformers): Use the transformers library with a small model capable of running on your machine.
+
+3. Image Generation (Stable Diffusion)
+You will be using Stable Diffusion for part of the assessment.
+
+Library: Please install diffusers and accelerate.
+
+Models: Pre-download a model suitable for the art style indicated with the attachment (Please see "Sample").
+
+Performance: If you do not have a dedicated GPU, please ensure your script is configured for CPU inference and consider testing with a lower iteration count/resolution to save time.
+
+Constraint:
+Local environment:
+MACBOOK M1 32GB MEMORY
