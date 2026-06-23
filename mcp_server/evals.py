@@ -19,8 +19,10 @@ from PIL import Image
 
 from .config import CONFIG
 
-_CLIP_NAME = "ViT-B-32"
-_CLIP_PRETRAINED = "laion2b_s34b_b79k"
+# ViT-L/14 (Large, 14px patches) — more discriminating image-text scoring than ViT-B/32,
+# and better aligned with how SDXL renders. Used only for evaluation/ranking, not generation.
+_CLIP_NAME = "ViT-L-14"
+_CLIP_PRETRAINED = "laion2b_s32b_b82k"
 
 
 @functools.lru_cache(maxsize=1)

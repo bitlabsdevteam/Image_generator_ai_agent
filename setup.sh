@@ -26,7 +26,7 @@ import torch
 print("torch", torch.__version__, "| MPS available:", torch.backends.mps.is_available())
 PY
 
-echo "==> Pre-downloading default Stable Diffusion model (DreamShaper-8, ~2GB)"
+echo "==> Pre-downloading default Stable Diffusion model (DreamShaper-XL, ~7GB)"
 "$VENV/bin/python" - <<'PY'
 from mcp_server.sd_pipeline import get_pipeline
 get_pipeline()  # downloads + caches the default model

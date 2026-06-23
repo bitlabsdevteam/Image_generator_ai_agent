@@ -63,21 +63,33 @@ def get_pipeline(model_name: str | None = None):
 
     spec = img["models"][model_name]
     device = _resolve_device(img["device"])
-    # On CPU, fp16 is unsupported/slow — use fp32 there.
-    dtype = _dtype(img["dtype"]) if device != "cpu" else torch.float32
 
     if spec["arch"] == "sdxl":
-        from diffusers import StableDiffusionXLPipeline as Pipe
-    else:
-        from diffusers import StableDiffusionPipeline as Pipe
+        from diffusers import StableDiffusionXLPipeline
 
-    # NOTE: logs go to stderr — stdout is the MCP JSON-RPC transport and must stay clean.
-    print(f"[sd] loading {spec['repo']} ({spec['arch']}) on {device}/{dtype} ...",
-          file=sys.stderr, flush=True)
-    pipe = Pipe.from_pretrained(spec["repo"], torch_dtype=dtype, safety_checker=None)
+        # SDXL on MPS must run fp32: the UNet overflows to NaN (pure-black images) in fp16
+        # on Metal — even with an fp16-fix VAE (the VAE fix only covers VAE decode). fp32 is
+        # reliable (~2-3 min/image at 1024px on M1). Use fp16 on CUDA where it's stable.
+        dtype = torch.float16 if device == "cuda" else torch.float32
+        # NOTE: logs go to stderr — stdout is the MCP JSON-RPC transport and must stay clean.
+        print(f"[sd] loading {spec['repo']} (sdxl) on {device}/{dtype} ...",
+              file=sys.stderr, flush=True)
+        pipe = StableDiffusionXLPipeline.from_pretrained(
+            spec["repo"], torch_dtype=dtype, use_safetensors=True
+        )
+    else:
+        from diffusers import StableDiffusionPipeline
+
+        # SD1.5: honor config dtype (fp32 on MPS avoids its own fp16 VAE NaN bug).
+        dtype = _dtype(img["dtype"]) if device != "cpu" else torch.float32
+        print(f"[sd] loading {spec['repo']} (sd15) on {device}/{dtype} ...",
+              file=sys.stderr, flush=True)
+        pipe = StableDiffusionPipeline.from_pretrained(
+            spec["repo"], torch_dtype=dtype, safety_checker=None
+        )
+
     pipe = pipe.to(device)
-    # Memory-friendly on unified-memory Macs.
-    pipe.enable_attention_slicing()
+    pipe.enable_attention_slicing()  # memory-friendly on unified-memory Macs
     pipe.set_progress_bar_config(disable=False)
 
     _PIPELINES[model_name] = pipe

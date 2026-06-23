@@ -14,8 +14,8 @@ Built for the local constraint: **MacBook M1 Pro, 32GB**, using Stable Diffusion
 config.yaml            Central config (models, device, eval thresholds, loop iters)
 mcp_server/            Reusable MCP server + image toolset
   server.py            FastMCP server (stdio) exposing the tools below
-  sd_pipeline.py       diffusers wrapper — DreamShaper-8 (SD1.5) on MPS, fp16
-  evals.py             CLIP prompt-alignment, style-similarity, aesthetic, vision judge
+  sd_pipeline.py       diffusers wrapper — DreamShaper-XL (SDXL) on MPS, fp32
+  evals.py             CLIP (ViT-L/14) prompt-alignment, style-similarity, aesthetic, vision judge
   styles.py            "semi-3d-anime" style preset (positive tags + negatives)
   llm_prompt.py        LLM-backed enhance_prompt (Ollama, graceful fallback)
 agent/                 Agent harness (MCP client)
@@ -43,7 +43,7 @@ bash setup.sh
 ```
 
 This creates a **Python 3.12** venv (`.venv`), installs `diffusers`/`accelerate`/`torch`/
-`open_clip`/`mcp`/`ollama`, downloads **DreamShaper-8** (~2GB), and checks Ollama.
+`open_clip`/`mcp`/`ollama`, downloads **DreamShaper-XL** (~7GB), and checks Ollama.
 
 > Why 3.12: the system default here is Python 3.14, which has no PyTorch wheels yet.
 
@@ -149,8 +149,19 @@ Example `claude_desktop_config.json` entry:
 - `llm.model`: the Ollama model used for enhance/refine.
 
 ## Notes on model choice
-The samples are glossy semi-3D anime character renders. **DreamShaper-8 (SD1.5)** is the
-best style/speed match on an M1 and is HuggingFace-hosted (loads directly via `diffusers`,
-no manual CivitAI download). DreamShaper-XL is available for higher fidelity at ~2-4x the
-time. Image generation deliberately uses `diffusers` (not GGUF/Ollama) — Ollama runs the
-*LLM* only; it cannot run Stable Diffusion.
+The samples are glossy semi-3D anime character renders. **DreamShaper-XL** (`Lykon/dreamshaper-xl-1-0`,
+SDXL) is the closest match and is the default; it's HuggingFace-hosted (loads directly via
+`diffusers`, no manual CivitAI download). `dreamshaper-8` (SD1.5, faster/lower-fidelity) and
+`dreamshaper-xl-turbo` are also in the registry — switch via `image.default_model` or the
+`model` tool param.
+
+**Apple-Silicon gotchas (important):**
+- **fp16 → NaN/black images on MPS.** SD1.5's VAE *and* SDXL's UNet overflow in fp16 on Metal,
+  so everything runs **fp32** on MPS (see `sd_pipeline.py`). Reliable, ~1 min/image at 768px.
+- **Resolution vs memory.** SDXL fp32 @ **768px** fits comfortably in 32GB (~56s/image). @1024px
+  it (~14GB) plus the CLIP eval model exceeds RAM → macOS swaps → ~30 min/image. Raise to 1024
+  only with other apps closed.
+
+Image generation deliberately uses `diffusers` (not GGUF/Ollama) — Ollama runs the *LLM* only;
+it cannot run Stable Diffusion. Evaluation uses **open_clip ViT-L/14** (scoring only — it ranks
+images, it does not generate them).

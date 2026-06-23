@@ -2,26 +2,31 @@
 # Read by both the MCP server and the agent harness.
 
 image:
-  # Model registry. Default is SD1.5 DreamShaper-8 — best style/speed match for the
-  # reference samples on an M1 Pro (32GB) via diffusers + MPS (fp16).
-  default_model: dreamshaper-8
+  # Model registry. Default is SDXL DreamShaper-XL — highest fidelity to the glossy
+  # semi-3D-anime reference samples. Runs on M1 (32GB) via diffusers + MPS.
+  default_model: dreamshaper-xl
   models:
-    dreamshaper-8:
-      repo: Lykon/dreamshaper-8        # HuggingFace-hosted; loads via diffusers.from_pretrained
-      arch: sd15
-    dreamshaper-xl:                     # optional higher-fidelity 1024px (slower, ~7GB)
+    dreamshaper-xl:                     # full SDXL @ 1024px — best quality (~1-2 min/image)
+      repo: Lykon/dreamshaper-xl-1-0
+      arch: sdxl
+    dreamshaper-xl-turbo:               # distilled SDXL — much faster, lower fidelity
       repo: Lykon/dreamshaper-xl-v2-turbo
       arch: sdxl
+    dreamshaper-8:                      # SD1.5 — fastest, lower fidelity (~50-70s/image)
+      repo: Lykon/dreamshaper-8
+      arch: sd15
 
   device: mps          # "mps" on Apple Silicon, "cpu" fallback, "cuda" if available
-  # float32 on MPS: fp16 SD1.5 VAE produces NaNs/black images on Metal. fp32 is reliable
-  # on a 32GB M1 (~50-70s/image at these settings). Set float16 only if your model is stable.
+  # dtype applies to SD1.5. On MPS, BOTH SD1.5 and SDXL run fp32 — fp16 overflows to NaN
+  # (black images) on Metal (SDXL's UNet, SD1.5's VAE). Reliable but ~2-3 min/image at 1024.
   dtype: float32
-  # Demo-friendly defaults: ~20-40s/image on M1 Pro.
-  steps: 25
-  guidance_scale: 7.0
+  steps: 25            # SDXL quality; lower for faster runs
+  guidance_scale: 6.5
+  # 768 is the reliable default on M1/32GB: fp32 SDXL @ 768 fits in unified memory (~56s/img).
+  # 1024 looks better but SDXL(~14GB)+CLIP eval exceeds 32GB -> macOS swaps -> ~30 min/img.
+  # Only raise to 1024 with most other apps closed.
   width: 768
-  height: 512          # banner-ish aspect, close to the sample lineup
+  height: 768
   seed: -1             # -1 = random each run
 
 llm:
@@ -33,16 +38,17 @@ llm:
 
 evals:
   # Loop gate thresholds (0..1). Generation is accepted when both are met.
-  # Calibrated for open_clip ViT-B/32 raw cosine: image-text alignment rarely exceeds
-  # ~0.30 even for strong matches (lower still for stylized art), so 0.21 is a realistic bar.
-  clip_threshold: 0.21
-  # The reference samples are tight character-group portraits, so wider scenes score lower
-  # on style similarity; ~0.42 is a meaningful, achievable bar for full-scene prompts.
-  style_threshold: 0.42
+  # Calibrated for open_clip ViT-L/14: stylized on-prompt renders score ~0.18 (a mismatch goes
+  # negative, e.g. -0.08), so 0.18 is a meaningful-but-reachable alignment bar.
+  clip_threshold: 0.18
+  # ViT-L/14 style similarity to the samples is framing-sensitive: ~0.37 for wide full-body
+  # party scenes, ~0.59 for character close-ups. 0.40 passes genuinely on-style renders while
+  # still triggering refinement on off-style drift; the loop always keeps the best image.
+  style_threshold: 0.40
   enable_vision_judge: false   # off by default — slow on the loop path
 
 loop:
-  max_iters: 3         # generate -> evaluate -> refine, up to N times
+  max_iters: 2         # generate -> evaluate -> refine, up to N times (SDXL is ~2-3 min/img)
 
 paths:
   outputs: outputs
