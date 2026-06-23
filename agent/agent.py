@@ -70,8 +70,10 @@ async def run(user_request: str) -> dict:
             # 2) Refine loop: generate -> evaluate -> (refine) until thresholds pass.
             for i in range(1, max_iters + 1):
                 print(f"[agent] === iteration {i}/{max_iters} ===", flush=True)
+                # style=None: enhance_prompt already applied the style preset to `prompt`;
+                # re-applying here would duplicate tags and overflow CLIP's 77-token limit.
                 gen = _parse(await session.call_tool("generate_image", {
-                    "prompt": prompt, "negative_prompt": negative, "style": "semi-3d-anime",
+                    "prompt": prompt, "negative_prompt": negative, "style": None,
                 }))
                 ctx.add("tool", json.dumps(gen), kind="tool_result")
 

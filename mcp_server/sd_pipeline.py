@@ -6,11 +6,34 @@ Loads the model once (module-level singleton) and renders images in fp16 on the 
 from __future__ import annotations
 
 import json
+import re
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
 import torch
+
+# Stop-words and style tokens to drop when building a readable filename from the prompt.
+_SLUG_SKIP = {
+    "a", "an", "the", "of", "and", "with", "in", "on", "at", "to", "for", "is", "are",
+    "semi", "3d", "anime", "style", "render", "glossy", "stylized", "character", "art",
+    "detailed", "highly", "vibrant", "colors", "cinematic", "lighting", "soft", "big",
+    "expressive", "eyes", "smooth", "shading",
+}
+
+
+def _slugify_prompt(prompt: str, max_words: int = 6) -> str:
+    """Build a short, readable filename slug from the subject words of a prompt.
+
+    Drops style keywords and stop-words so the name reflects the scene, e.g.
+    'American teenagers, laughing and dancing at a party, semi-3D anime style' ->
+    'american-teenagers-laughing-dancing-party'.
+    """
+    words = re.findall(r"[a-zA-Z0-9]+", prompt.lower())
+    kept = [w for w in words if w not in _SLUG_SKIP]
+    slug = "-".join((kept or words)[:max_words])
+    return slug or "image"
 
 from .config import CONFIG
 from .styles import apply_style
@@ -48,7 +71,9 @@ def get_pipeline(model_name: str | None = None):
     else:
         from diffusers import StableDiffusionPipeline as Pipe
 
-    print(f"[sd] loading {spec['repo']} ({spec['arch']}) on {device}/{dtype} ...", flush=True)
+    # NOTE: logs go to stderr — stdout is the MCP JSON-RPC transport and must stay clean.
+    print(f"[sd] loading {spec['repo']} ({spec['arch']}) on {device}/{dtype} ...",
+          file=sys.stderr, flush=True)
     pipe = Pipe.from_pretrained(spec["repo"], torch_dtype=dtype, safety_checker=None)
     pipe = pipe.to(device)
     # Memory-friendly on unified-memory Macs.
@@ -79,8 +104,15 @@ def generate(
     pipe = get_pipeline(model)
     device = _resolve_device(img["device"])
 
-    full_prompt, preset_negative = apply_style(prompt, style)
-    negative = negative_prompt or preset_negative
+    # Apply the style preset ONLY when a style is given. Callers that already styled the
+    # prompt (e.g. via enhance_prompt) must pass style=None to avoid double-application,
+    # which would duplicate the style suffix and overflow CLIP's 77-token limit.
+    if style:
+        full_prompt, preset_negative = apply_style(prompt, style)
+        negative = negative_prompt or preset_negative
+    else:
+        full_prompt = prompt
+        negative = negative_prompt or ""
 
     steps = steps or img["steps"]
     width = width or img["width"]
@@ -107,7 +139,10 @@ def generate(
 
     out_dir = Path(CONFIG["paths"]["outputs"])
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    png_path = out_dir / f"img_{stamp}_{seed}.png"
+    # Readable, descriptive filename: "<subject-slug>_<timestamp>.png" (timestamp keeps it
+    # unique). The seed is retained in the sidecar metadata for reproducibility.
+    slug = _slugify_prompt(full_prompt)
+    png_path = out_dir / f"{slug}_{stamp}.png"
     image.save(png_path)
 
     meta = {
@@ -127,5 +162,5 @@ def generate(
     with open(png_path.with_suffix(".json"), "w") as f:
         json.dump(meta, f, indent=2)
 
-    print(f"[sd] wrote {png_path} in {elapsed}s", flush=True)
+    print(f"[sd] wrote {png_path} in {elapsed}s", file=sys.stderr, flush=True)
     return meta

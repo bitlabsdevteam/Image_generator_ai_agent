@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import functools
+import os
 from pathlib import Path
 
 import yaml
@@ -9,6 +10,31 @@ import yaml
 # Project root = parent of this file's package directory.
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "config.yaml"
+ENV_PATH = ROOT / ".env"
+
+
+def _load_dotenv(path: Path) -> None:
+    """Minimal .env loader (no extra dependency). Sets vars not already in the env.
+
+    Skips blank lines, comments, and the placeholder token. Also mirrors HF_TOKEN to
+    HUGGING_FACE_HUB_TOKEN so all huggingface_hub versions pick it up.
+    """
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        if not value or value == "hf_replace_me_with_your_token":
+            continue  # ignore the unset placeholder
+        os.environ.setdefault(key, value)
+    if os.environ.get("HF_TOKEN"):
+        os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", os.environ["HF_TOKEN"])
+
+
+_load_dotenv(ENV_PATH)
 
 
 @functools.lru_cache(maxsize=1)

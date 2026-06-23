@@ -72,7 +72,8 @@ one argument). With no argument, it falls back to a built-in demo prompt.
 
 You'll see the loop run live: connect to MCP server → enhance prompt → generate → evaluate →
 (refine if below threshold) → final **best** image path + scores. The chosen PNG (plus a
-sidecar `.json` of its generation metadata) lands in `outputs/`.
+sidecar `.json` of its generation metadata) lands in `outputs/`. Files are named
+descriptively from the prompt, e.g. `american-teenagers-laughing-dancing-party_20260623_115044.png`.
 
 ### How the agent works
 

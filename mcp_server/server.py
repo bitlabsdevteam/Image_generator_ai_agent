@@ -42,7 +42,7 @@ def enhance_prompt(user_request: str, style: str = "semi-3d-anime") -> dict:
 def generate_image(
     prompt: str,
     negative_prompt: str | None = None,
-    style: str = "semi-3d-anime",
+    style: str | None = "semi-3d-anime",
     steps: int | None = None,
     width: int | None = None,
     height: int | None = None,

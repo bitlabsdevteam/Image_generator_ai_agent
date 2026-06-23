@@ -12,12 +12,11 @@ STYLES: dict[str, dict] = {
             "Glossy semi-3D anime / mobile-game character render: smooth subsurface "
             "shading, big expressive eyes, clean stylized features, soft studio lighting."
         ),
-        # Appended to the subject prompt to lock in the look.
+        # Appended to the subject prompt to lock in the look. Kept short (~20 tokens) so the
+        # subject + style stays within CLIP's 77-token limit and the style is never truncated.
         "positive": (
-            "semi-3D anime style, stylized 3D character render, glossy smooth shading, "
-            "subsurface scattering skin, big expressive eyes, vibrant saturated colors, "
-            "soft cinematic studio lighting, clean rim light, mobile game character art, "
-            "Pixar-meets-anime, highly detailed, sharp focus, 4k render, octane render"
+            "semi-3D anime style, glossy stylized 3D render, big expressive eyes, "
+            "vibrant colors, soft cinematic lighting, highly detailed"
         ),
         "negative": (
             "flat 2d, line art, sketch, lowres, blurry, bad anatomy, deformed, "
