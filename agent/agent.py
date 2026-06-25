@@ -20,6 +20,7 @@ from mcp.client.stdio import stdio_client
 
 from mcp_server.config import CONFIG, ROOT
 from agent import llm
+from agent import interview
 from agent.context import ContextManager
 
 SYSTEM_PROMPT = (Path(__file__).parent / "system_prompt.txt").read_text()
@@ -40,7 +41,7 @@ def _parse(result) -> dict:
     return {}
 
 
-async def run(user_request: str) -> dict:
+async def run(user_request: str, *, interactive: bool = False) -> dict:
     ctx = ContextManager(system_prompt=SYSTEM_PROMPT, max_tokens=3000)
     ctx.add("user", f"Request: {user_request}")
 
@@ -57,9 +58,27 @@ async def run(user_request: str) -> dict:
             tools = [t.name for t in (await session.list_tools()).tools]
             print(f"[agent] connected to MCP server; tools: {tools}\n", flush=True)
 
+            # 0) Optional clarifying interview: the LLM analyses the request and asks the
+            #    user 0-4 multiple-choice questions, then folds answers into the request,
+            #    chosen style, and generation params. Skipped (no-op) when non-interactive.
+            style = "semi-3d-anime"
+            gen_params: dict = {}
+            if interactive:
+                styles = _parse(await session.call_tool("list_styles", {}))
+                styles = styles.get("result", styles) if isinstance(styles, dict) else styles
+                models = _parse(await session.call_tool("list_models", {}))
+                qs = interview.generate_questions(user_request, styles, models)
+                answers = interview.ask(qs)
+                user_request, style, gen_params = interview.compose(
+                    user_request, qs, answers, styles, models)
+                if qs:
+                    ctx.add("user", f"Clarified request: {user_request}")
+                    print(f"[agent] clarified request: {user_request}\n"
+                          f"[agent] style={style} params={gen_params or '{}'}\n", flush=True)
+
             # 1) Enhance the short request into a rich SD prompt (LLM-backed tool).
             enh = _parse(await session.call_tool(
-                "enhance_prompt", {"user_request": user_request, "style": "semi-3d-anime"}
+                "enhance_prompt", {"user_request": user_request, "style": style}
             ))
             subject = enh.get("subject", user_request)
             prompt = enh["prompt"]
@@ -74,6 +93,7 @@ async def run(user_request: str) -> dict:
                 # re-applying here would duplicate tags and overflow CLIP's 77-token limit.
                 gen = _parse(await session.call_tool("generate_image", {
                     "prompt": prompt, "negative_prompt": negative, "style": None,
+                    **gen_params,
                 }))
                 ctx.add("tool", json.dumps(gen), kind="tool_result")
 
@@ -98,7 +118,7 @@ async def run(user_request: str) -> dict:
                 # 3) Ask the LLM to fix the weakest dimension, then re-apply style.
                 subject = llm.refine_prompt(subject, prompt, ev)
                 reenh = _parse(await session.call_tool(
-                    "enhance_prompt", {"user_request": subject, "style": "semi-3d-anime"}
+                    "enhance_prompt", {"user_request": subject, "style": style}
                 ))
                 prompt, negative = reenh["prompt"], reenh["negative_prompt"]
                 ctx.add("assistant", f"Refined subject -> {subject}")
@@ -109,8 +129,15 @@ async def run(user_request: str) -> dict:
 
 
 def main() -> None:
-    request = " ".join(sys.argv[1:]).strip() or "American teenagers having fun at a party"
-    result = asyncio.run(run(request))
+    flags = {"-i", "--interactive", "-y", "--no-interactive"}
+    args = [a for a in sys.argv[1:] if a not in flags]
+    request = " ".join(args).strip() or "American teenagers having fun at a party"
+    force_on = any(a in ("-i", "--interactive") for a in sys.argv[1:])
+    force_off = any(a in ("-y", "--no-interactive") for a in sys.argv[1:])
+    # Ask clarifying questions by default on a real terminal; `-y` / non-TTY skips them
+    # (keeps scripts and evals/run_evals.py one-shot). `-i` forces them on.
+    interactive = force_on or (not force_off and sys.stdin.isatty())
+    result = asyncio.run(run(request, interactive=interactive))
     best = result["best"]
     print("\n" + "=" * 60)
     print("FINAL RESULT")
