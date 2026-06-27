@@ -33,12 +33,32 @@ Two halves communicate over MCP (stdio), not in-process:
 
 - **`mcp_server/`** — a `FastMCP` server (`server.py`) exposing the image toolset:
   `enhance_prompt`, `generate_image`, `evaluate_image`, `vision_judge`, `list_styles`,
-  `list_models`. Each tool is a thin wrapper over a module (`llm_prompt`, `sd_pipeline`,
-  `evals`, `styles`). This server is reusable by any MCP client (e.g. Claude Desktop).
+  `list_models`, plus `plan_scene` and `verify_image` for spatial control. Each tool is a thin
+  wrapper over a module (`llm_prompt`, `sd_pipeline`, `evals`, `styles`, `scene_planner`). This
+  server is reusable by any MCP client (e.g. Claude Desktop).
 - **`agent/agent.py`** — an MCP *client* that **spawns the server as a subprocess** over
-  stdio and drives a refine loop: `enhance_prompt` → (`generate_image` → `evaluate_image` →
-  LLM `refine_prompt` → re-`enhance_prompt`) up to `loop.max_iters` times, keeping the best
-  image by composite score.
+  stdio and drives the loop: `enhance_prompt` + `plan_scene` → (`generate_image` (ControlNet-
+  conditioned by the plan) → `evaluate_image` (style) + `verify_image` (constraints) →
+  `replan_scene` / `refine_prompt`) up to `loop.max_iters` times, keeping the best image by a
+  composite that weights satisfied constraints heavily.
+
+### Spatial control (why prompts alone weren't enough)
+
+CLIP-guided SDXL has no spatial operator — "girl standing **on top of** a burger, arms up"
+collapses to "girl + burger" with the strongest noun prior winning, and `clip_score` is blind
+to layout so it can't catch the error. The fix is structural, all derived from the prompt at
+runtime (no pose presets / keyword tables):
+- **`scene_planner.py`** turns any request into a JSON plan: entities, **spatial relations**,
+  normalized boxes, and a **parametric pose** (joint angles) per human. `normalize_layout`
+  snaps boxes to satisfy the relations geometrically. It disables Qwen "thinking" (`/no_think`,
+  low temp) or planning takes minutes.
+- **`pose_control.py`** builds the OpenPose skeleton **parametrically via forward kinematics**
+  from the plan's joint angles (a neutral rig + angles; nothing pose-specific hardcoded).
+- **`sd_pipeline.py`** turns the plan into ControlNet conditioning (multi-ControlNet, config
+  `image.controlnet.controls`, default `[openpose]`).
+- **`evals.verify_constraints`** has the local VLM (`gemma4:12b`) grade each plan constraint
+  (pose/placement) yes/no — the gate CLIP can't be. Failures drive `scene_planner.replan`,
+  which fixes **structure** (boxes/poses), since rewriting text can't fix spatial errors.
 
 ### Things that aren't obvious from a single file
 

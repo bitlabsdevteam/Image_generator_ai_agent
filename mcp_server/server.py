@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 from .config import CONFIG
 from . import evals as _evals
 from . import sd_pipeline
+from . import scene_planner as _planner
 from .styles import list_styles as _list_styles
 from .llm_prompt import enhance as _enhance
 
@@ -39,6 +40,16 @@ def enhance_prompt(user_request: str, style: str = "semi-3d-anime") -> dict:
 
 
 @mcp.tool()
+def plan_scene(user_request: str) -> dict:
+    """Parse a request into a structured scene plan (entities, spatial relations, boxes, poses).
+
+    The plan drives ControlNet conditioning and the verifier's checklist, so spatial
+    relationships and poses are enforced structurally rather than left to CLIP text guidance.
+    """
+    return _planner.plan_scene(user_request)
+
+
+@mcp.tool()
 def generate_image(
     prompt: str,
     negative_prompt: str | None = None,
@@ -49,11 +60,14 @@ def generate_image(
     guidance_scale: float | None = None,
     seed: int | None = None,
     model: str | None = None,
+    scene_plan: dict | None = None,
 ) -> dict:
     """Render an image with Stable Diffusion (diffusers on MPS) and save it.
 
     Returns metadata including the output PNG path. Style tags are auto-appended to the
-    prompt; pass negative_prompt to override the style's default negatives.
+    prompt; pass negative_prompt to override the style's default negatives. Pass a
+    scene_plan (from plan_scene) to enforce poses/placement via ControlNet — the reliable
+    fix when text alone can't pin down composition.
     """
     return sd_pipeline.generate(
         prompt=prompt,
@@ -65,7 +79,18 @@ def generate_image(
         guidance_scale=guidance_scale,
         seed=seed,
         model=model,
+        scene_plan=scene_plan,
     )
+
+
+@mcp.tool()
+def verify_image(image_path: str, scene_plan: dict) -> dict:
+    """Check an image against a scene plan's constraints with the local vision model.
+
+    Returns per-constraint pass/fail (pose, placement, relation) — the structured spatial gate
+    that CLIP scoring cannot provide.
+    """
+    return _evals.verify_constraints(image_path, scene_plan)
 
 
 @mcp.tool()

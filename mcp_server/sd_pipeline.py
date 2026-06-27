@@ -37,9 +37,12 @@ def _slugify_prompt(prompt: str, max_words: int = 6) -> str:
 
 from .config import CONFIG
 from .styles import apply_style
+from . import pose_control
 
 # Cache of loaded pipelines keyed by model name, so repeated calls are cheap.
 _PIPELINES: dict[str, object] = {}
+# ControlNet pipelines are heavier; cache them separately keyed by (model, controlnet_repo).
+_CONTROLNET_PIPELINES: dict[tuple[str, str], object] = {}
 
 
 def _resolve_device(requested: str) -> str:
@@ -96,6 +99,91 @@ def get_pipeline(model_name: str | None = None):
     return pipe
 
 
+def get_controlnet_pipeline(controls: tuple[str, ...], model_name: str | None = None):
+    """Lazily load an SDXL multi-ControlNet pipeline for the given ordered ``controls``.
+
+    ``controls`` are config keys under ``image.controlnet`` (e.g. ("openpose",) or
+    ("openpose","depth")). Each ControlNet adds ~2.5GB, so pipelines are built and cached only
+    when conditioning is actually requested, keyed by (model, controls).
+    """
+    from diffusers import ControlNetModel, StableDiffusionXLControlNetPipeline
+
+    img = CONFIG["image"]
+    model_name = model_name or img["default_model"]
+    spec = img["models"][model_name]
+    if spec["arch"] != "sdxl":
+        raise ValueError(f"ControlNet path requires an SDXL model, got {model_name} ({spec['arch']})")
+
+    key = (model_name, controls)
+    if key in _CONTROLNET_PIPELINES:
+        return _CONTROLNET_PIPELINES[key]
+
+    device = _resolve_device(img["device"])
+    # Same MPS rule as the base pipeline: fp32 on Metal (fp16 UNet -> NaN/black), fp16 on CUDA.
+    dtype = torch.float16 if device == "cuda" else torch.float32
+    cn_cfg = img["controlnet"]
+    nets = [
+        ControlNetModel.from_pretrained(cn_cfg[name]["repo"], torch_dtype=dtype, use_safetensors=True)
+        for name in controls
+    ]
+    print(f"[sd] loading ControlNet {list(controls)} + {spec['repo']} on {device}/{dtype} ...",
+          file=sys.stderr, flush=True)
+    pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
+        spec["repo"], controlnet=(nets if len(nets) > 1 else nets[0]),
+        torch_dtype=dtype, use_safetensors=True,
+    )
+    pipe = pipe.to(device)
+    pipe.enable_attention_slicing()
+    pipe.set_progress_bar_config(disable=False)
+
+    _CONTROLNET_PIPELINES[key] = pipe
+    return pipe
+
+
+def _layout_map(plan: dict, width: int, height: int):
+    """A coarse layout image (filled silhouettes per entity) for a canny/depth ControlNet.
+
+    Nearer entities (later in the plan, or the subject of an 'on top of'/'in front of'
+    relation) are drawn brighter so a depth ControlNet reads figure-over-object ordering.
+    """
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (width, height), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    entities = plan.get("entities", [])
+    nearer = {r["subject"] for r in plan.get("relations", [])
+              if r["predicate"] in ("on top of", "on", "standing on", "in front of", "above")}
+    for i, e in enumerate(entities):
+        x0, y0, x1, y1 = (e["box"][0] * width, e["box"][1] * height,
+                          e["box"][2] * width, e["box"][3] * height)
+        depth = 200 if e["id"] in nearer else 90 + int(60 * i / max(1, len(entities)))
+        draw.ellipse([x0, y0, x1, y1], fill=(depth, depth, depth))
+    return img
+
+
+def _build_control_images(plan: dict, controls: tuple[str, ...], width: int, height: int):
+    """Build the control image for each requested control from the scene plan.
+
+    Returns (active_controls, images) keeping only controls whose image could be built — so a
+    plan with no humans drops 'openpose' and the pipeline is sized to what actually applies.
+    """
+    active: list[str] = []
+    images: list = []
+    for name in controls:
+        if name == "openpose":
+            sk = pose_control.skeletons_from_plan(plan, width, height)
+            if sk is None:
+                continue
+            img = sk
+        elif name in ("depth", "canny"):
+            img = _layout_map(plan, width, height)
+        else:
+            continue
+        active.append(name)
+        images.append(img)
+    return tuple(active), images
+
+
 def generate(
     prompt: str,
     negative_prompt: str | None = None,
@@ -106,15 +194,34 @@ def generate(
     guidance_scale: float | None = None,
     seed: int | None = None,
     model: str | None = None,
+    scene_plan: dict | None = None,
 ) -> dict:
     """Render one image and write it (plus sidecar metadata) to the outputs dir.
 
     If ``negative_prompt`` is None the style preset supplies one; the style tags are
     appended to ``prompt`` so callers can pass either a bare subject or a full prompt.
+
+    If ``scene_plan`` is given (see ``scene_planner``), its entity boxes/poses are turned into
+    ControlNet conditioning so spatial relations and poses ("standing on top of X", "arms up")
+    are enforced structurally — what CLIP text guidance cannot do. Plans with no usable control
+    (e.g. no humans, controls disabled) fall back to plain text-to-image.
     """
     img = CONFIG["image"]
-    pipe = get_pipeline(model)
     device = _resolve_device(img["device"])
+
+    steps = steps or img["steps"]
+    width = width or img["width"]
+    height = height or img["height"]
+
+    # Decide on conditioning from the plan + configured controls.
+    cn_cfg = img.get("controlnet", {})
+    wanted = tuple(cn_cfg.get("controls", []) or ())
+    active, control_images = (
+        _build_control_images(scene_plan, wanted, width, height) if (scene_plan and wanted)
+        else ((), [])
+    )
+    use_control = bool(active)
+    pipe = get_controlnet_pipeline(active, model) if use_control else get_pipeline(model)
 
     # Apply the style preset ONLY when a style is given. Callers that already styled the
     # prompt (e.g. via enhance_prompt) must pass style=None to avoid double-application,
@@ -126,15 +233,21 @@ def generate(
         full_prompt = prompt
         negative = negative_prompt or ""
 
-    steps = steps or img["steps"]
-    width = width or img["width"]
-    height = height or img["height"]
     guidance_scale = guidance_scale if guidance_scale is not None else img["guidance_scale"]
     seed = img["seed"] if seed is None else seed
     if seed is None or seed < 0:
         seed = int(time.time() * 1000) % (2**32)
 
     generator = torch.Generator(device="cpu").manual_seed(seed)
+
+    # ControlNet kwargs only on the control path; the plain pipeline call is untouched otherwise.
+    extra: dict = {}
+    if use_control:
+        scales = [float(cn_cfg[name]["conditioning_scale"]) for name in active]
+        extra = {
+            "image": control_images if len(control_images) > 1 else control_images[0],
+            "controlnet_conditioning_scale": scales if len(scales) > 1 else scales[0],
+        }
 
     t0 = time.time()
     result = pipe(
@@ -145,6 +258,7 @@ def generate(
         width=width,
         height=height,
         generator=generator,
+        **extra,
     )
     elapsed = round(time.time() - t0, 1)
     image = result.images[0]
@@ -156,6 +270,9 @@ def generate(
     slug = _slugify_prompt(full_prompt)
     png_path = out_dir / f"{slug}_{stamp}.png"
     image.save(png_path)
+    # Persist the control map(s) next to the render for debugging/reproducibility.
+    for name, cimg in zip(active, control_images):
+        cimg.save(out_dir / f"{slug}_{stamp}_control_{name}.png")
 
     meta = {
         "path": str(png_path),
@@ -169,6 +286,8 @@ def generate(
         "height": height,
         "seed": seed,
         "device": device,
+        "controls": list(active),
+        "controlnet_conditioning_scale": extra.get("controlnet_conditioning_scale"),
         "elapsed_sec": elapsed,
     }
     with open(png_path.with_suffix(".json"), "w") as f:

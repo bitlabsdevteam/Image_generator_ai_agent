@@ -10,11 +10,10 @@ fallback contract in `mcp_server/llm_prompt.py:_ollama_expand`.
 """
 from __future__ import annotations
 
-import json
-import re
 import sys
 
 from agent import llm
+from mcp_server._jsonio import extract_json
 
 # Cap to avoid question fatigue (matches the "dynamic 0-4" design decision).
 _MAX_QUESTIONS = 4
@@ -64,20 +63,8 @@ def generate_questions(user_request: str, styles: list, models: dict) -> list[di
 
 def _parse_questions(raw: str) -> list[dict]:
     """Defensively extract a validated question list from an LLM response."""
-    text = raw.strip()
-    # Strip ```json ... ``` fences if the model added them despite instructions.
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z]*\n?|\n?```$", "", text).strip()
-    # Fall back to the first {...} block if there's surrounding prose.
-    if not text.startswith("{"):
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if not match:
-            return []
-        text = match.group(0)
-
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
+    data = extract_json(raw)
+    if data is None:
         return []
 
     questions: list[dict] = []

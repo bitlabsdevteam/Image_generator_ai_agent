@@ -16,6 +16,16 @@ def chat(messages: list[dict], temperature: float | None = None) -> str:
     return resp["message"]["content"].strip()
 
 
+def replan_scene(scene_plan: dict, failed_constraints: list[dict], user_request: str) -> dict:
+    """Refine the scene *structure* (boxes/poses) to fix the verifier's failed constraints.
+
+    Delegates to the server-side planner (it runs the same local LLM); spatial errors can only
+    be fixed by changing layout, not by rewriting the text prompt.
+    """
+    from mcp_server import scene_planner
+    return scene_planner.replan(scene_plan, failed_constraints, user_request)
+
+
 def refine_prompt(subject: str, prev_prompt: str, eval_result: dict) -> str:
     """Ask the LLM to rewrite the SD prompt to fix the weakest eval dimension.
 
@@ -32,7 +42,9 @@ def refine_prompt(subject: str, prev_prompt: str, eval_result: dict) -> str:
     guidance = " Also, ".join(weak) or "improve overall composition and clarity"
     msgs = [
         {"role": "system", "content": (
-            "You rewrite Stable Diffusion prompts. Output ONLY the improved comma-separated "
+            "You rewrite Stable Diffusion prompts. Keep every spatial relationship from the "
+            "original request verbatim (e.g. 'standing on top of', 'inside', 'behind') and keep "
+            "named colour palettes, brands and counts. Output ONLY the improved comma-separated "
             "prompt text for the SUBJECT (no style keywords like 3d/anime, no quotes, no notes)."
         )},
         {"role": "user", "content": (

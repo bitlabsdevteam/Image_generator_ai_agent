@@ -21,13 +21,30 @@ image:
   # (black images) on Metal (SDXL's UNet, SD1.5's VAE). Reliable but ~2-3 min/image at 1024.
   dtype: float32
   steps: 25            # SDXL quality; lower for faster runs
-  guidance_scale: 6.5
+  # 7.5 tightens prompt adherence (pose/composition/palette) vs the looser 6.5. DreamShaper-XL
+  # base stays clean here; push past ~8 and it starts to oversaturate/contrast-clip.
+  guidance_scale: 7.5
   # 768 is the reliable default on M1/32GB: fp32 SDXL @ 768 fits in unified memory (~56s/img).
   # 1024 looks better but SDXL(~14GB)+CLIP eval exceeds 32GB -> macOS swaps -> ~30 min/img.
   # Only raise to 1024 with most other apps closed.
   width: 768
   height: 768
   seed: -1             # -1 = random each run
+
+  # ControlNet gives SDXL the spatial control that prompts alone cannot: it conditions the UNet
+  # on control images built from the scene plan (mcp_server/scene_planner.py) so poses and
+  # placements ("standing on top of a giant burger, arms up") are enforced structurally instead
+  # of left to CLIP's bag-of-words. `controls` lists which ControlNets to stack; each is loaded
+  # lazily on first use (~2.5GB). Default is openpose only — on a 32GB M1, fp32 SDXL + two fp32
+  # ControlNets can exceed RAM and swap; add "depth" only with memory headroom.
+  controlnet:
+    controls: [openpose]                 # extensible, e.g. [openpose, depth]
+    openpose:
+      repo: xinsir/controlnet-openpose-sdxl-1.0
+      conditioning_scale: 0.7            # how hard the skeleton constrains pose/placement (0..1)
+    depth:                                # opt-in object-layout control (filled-box depth map)
+      repo: diffusers/controlnet-depth-sdxl-1.0
+      conditioning_scale: 0.55
 
 llm:
   provider: ollama
@@ -47,8 +64,25 @@ evals:
   style_threshold: 0.40
   enable_vision_judge: false   # off by default — slow on the loop path
 
+# Scene planning: parse the request into entities + spatial relations + per-human poses, used to
+# build ControlNet conditioning and the verifier's checklist. Disable to fall back to the old
+# plain prompt->image path.
+scene_planning:
+  enabled: true
+
+# VLM constraint verifier: a multimodal model judges each scene-plan constraint (pose, placement,
+# count) per render and drives structural replanning. Uses the local llm.vision_model (offline).
+verify:
+  enabled: true
+  model: gemma4:12b            # falls back to llm.vision_model if unset
+
 loop:
-  max_iters: 2         # generate -> evaluate -> refine, up to N times (SDXL is ~2-3 min/img)
+  # generate -> evaluate -> verify -> replan, up to N times. Higher for correctness on hard
+  # spatial prompts (SDXL+ControlNet ~2-3 min/img, plus the VLM check each pass).
+  max_iters: 5
+  # Keep only the correct version: after the run, delete every rejected render (PNG + sidecar
+  # JSON), leaving outputs/ with just the kept best/passing image. Set false to keep all attempts.
+  keep_only_best: true
 
 paths:
   outputs: outputs

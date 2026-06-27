@@ -120,6 +120,54 @@ def evaluate(image_path: str, prompt: str) -> dict:
     }
 
 
+def verify_constraints(image_path: str, scene_plan: dict) -> dict:
+    """Have a multimodal model grade each scene-plan constraint (pose, placement, relation).
+
+    This is the structured spatial gate CLIP cannot provide: it checks *layout*, not concept
+    presence. Returns {"available", "all_ok", "constraints":[{id, ok, reason}], "failed":[...]}.
+    Degrades gracefully (available=False) if the VLM is down or returns unparseable output, so
+    the loop can fall back to the style/quality gate rather than block.
+    """
+    from . import scene_planner
+    from ._jsonio import extract_json
+
+    checklist = scene_planner.constraints_from_plan(scene_plan)
+    if not checklist:
+        return {"available": True, "all_ok": True, "constraints": [], "failed": []}
+
+    model = CONFIG.get("verify", {}).get("model") or CONFIG["llm"]["vision_model"]
+    lines = "\n".join(f'- id="{c["id"]}": {c["text"]}' for c in checklist)
+    msg = (
+        "You are verifying whether an AI-generated image satisfies specific composition "
+        "constraints. Judge ONLY what is visible. For EACH constraint answer strictly.\n"
+        f"Constraints:\n{lines}\n\n"
+        'Output ONLY JSON: {"constraints":[{"id":"<id>","ok":true|false,'
+        '"reason":"<short>"}]}. ok=true only if clearly satisfied.'
+    )
+    try:
+        import ollama
+
+        resp = ollama.chat(model=model,
+                           messages=[{"role": "user", "content": msg, "images": [image_path]}])
+        data = extract_json(resp["message"]["content"])
+    except Exception:
+        data = None
+
+    if not isinstance(data, dict) or not isinstance(data.get("constraints"), list):
+        return {"available": False, "all_ok": None, "constraints": [], "failed": []}
+
+    graded = {str(c.get("id")): c for c in data["constraints"] if isinstance(c, dict)}
+    results = []
+    for c in checklist:
+        g = graded.get(c["id"], {})
+        ok = bool(g.get("ok", False))
+        results.append({"id": c["id"], "text": c["text"], "ok": ok,
+                        "reason": str(g.get("reason", ""))})
+    failed = [r for r in results if not r["ok"]]
+    return {"available": True, "all_ok": not failed, "constraints": results, "failed": failed,
+            "judge_model": model}
+
+
 def vision_judge(image_path: str, prompt: str) -> dict:
     """Optional qualitative grade from a multimodal Ollama model. Slow; off the loop path."""
     import ollama

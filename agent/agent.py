@@ -1,9 +1,14 @@
 """Agent harness: orchestrates the semi-3D-anime image generation loop.
 
-This is an MCP *client*. It launches the bundled MCP server over stdio and drives its
-tools (enhance_prompt -> generate_image -> evaluate_image) in a refine loop, using the
-local Ollama LLM (via agent.llm) to rewrite prompts when evals fall short. Context is
-kept bounded by agent.context.ContextManager.
+This is an MCP *client*. It launches the bundled MCP server over stdio and drives a small
+multi-agent pipeline (see agent.agents) over its tools:
+
+    PromptAgent (analyse) -> GenerationAgent (UNet/SD) -> EvalAgent (OpenCLIP) --fail--> back
+
+The orchestrator below runs that loop up to loop.max_iters times, feeds each failed eval
+back to the PromptAgent to regenerate a better prompt, keeps the best render, and finally
+deletes every rejected render so outputs/ holds only the correct version. Context is kept
+bounded by agent.context.ContextManager.
 
 Usage:
     python -m agent.agent "American teenagers having fun at a party"
@@ -19,26 +24,13 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from mcp_server.config import CONFIG, ROOT
-from agent import llm
 from agent import interview
+from agent.agents import (
+    PromptAgent, GenerationAgent, EvalAgent, cleanup_outputs, parse_tool_result as _parse,
+)
 from agent.context import ContextManager
 
 SYSTEM_PROMPT = (Path(__file__).parent / "system_prompt.txt").read_text()
-
-
-def _parse(result) -> dict:
-    """Extract a dict payload from an MCP CallToolResult."""
-    if getattr(result, "structuredContent", None):
-        sc = result.structuredContent
-        # FastMCP wraps non-dict returns under "result"; dicts pass through.
-        return sc.get("result", sc) if isinstance(sc, dict) else sc
-    for block in result.content:
-        if getattr(block, "type", None) == "text":
-            try:
-                return json.loads(block.text)
-            except json.JSONDecodeError:
-                return {"text": block.text}
-    return {}
 
 
 async def run(user_request: str, *, interactive: bool = False) -> dict:
@@ -50,7 +42,9 @@ async def run(user_request: str, *, interactive: bool = False) -> dict:
     )
 
     max_iters = CONFIG["loop"]["max_iters"]
+    keep_only_best = CONFIG["loop"].get("keep_only_best", True)
     best: dict | None = None
+    produced: list[str] = []  # every render written this run, for end-of-run cleanup
 
     async with stdio_client(server) as (read, write):
         async with ClientSession(read, write) as session:
@@ -76,53 +70,77 @@ async def run(user_request: str, *, interactive: bool = False) -> dict:
                     print(f"[agent] clarified request: {user_request}\n"
                           f"[agent] style={style} params={gen_params or '{}'}\n", flush=True)
 
-            # 1) Enhance the short request into a rich SD prompt (LLM-backed tool).
-            enh = _parse(await session.call_tool(
-                "enhance_prompt", {"user_request": user_request, "style": style}
-            ))
-            subject = enh.get("subject", user_request)
-            prompt = enh["prompt"]
-            negative = enh["negative_prompt"]
-            ctx.add("assistant", f"Enhanced prompt: {prompt}")
-            print(f"[agent] enhanced prompt:\n  {prompt}\n", flush=True)
+            # Wire the three single-responsibility agents over this MCP session.
+            verify_on = CONFIG.get("verify", {}).get("enabled", True)
+            prompt_agent = PromptAgent(session, style=style)
+            gen_agent = GenerationAgent(session)
+            eval_agent = EvalAgent(session, verify_on=verify_on)
 
-            # 2) Refine loop: generate -> evaluate -> (refine) until thresholds pass.
+            # 1) PROMPT AGENT — analyse the request into the best prompt + scene plan.
+            state = await prompt_agent.analyse(user_request)
+            ctx.add("assistant", f"Enhanced prompt: {state['prompt']}")
+            print(f"[agent:prompt] enhanced prompt:\n  {state['prompt']}\n", flush=True)
+            if state.get("scene_plan"):
+                rels = ", ".join(f"{r['subject']} {r['predicate']} {r['object']}"
+                                 for r in state["scene_plan"].get("relations", [])) or "none"
+                ctx.add("assistant", f"Scene plan relations: {rels}")
+                print(f"[agent:prompt] scene plan: "
+                      f"{len(state['scene_plan'].get('entities', []))} entities; "
+                      f"relations: {rels}\n", flush=True)
+
+            # 2) Loop: GENERATION AGENT -> EVAL AGENT -> (on fail) feed back to PROMPT AGENT.
             for i in range(1, max_iters + 1):
                 print(f"[agent] === iteration {i}/{max_iters} ===", flush=True)
-                # style=None: enhance_prompt already applied the style preset to `prompt`;
-                # re-applying here would duplicate tags and overflow CLIP's 77-token limit.
-                gen = _parse(await session.call_tool("generate_image", {
-                    "prompt": prompt, "negative_prompt": negative, "style": None,
-                    **gen_params,
-                }))
+
+                gen = await gen_agent.generate(state, gen_params)
+                produced.append(gen["path"])
                 ctx.add("tool", json.dumps(gen), kind="tool_result")
+                print(f"[agent:gen] rendered {gen['path']}", flush=True)
 
-                ev = _parse(await session.call_tool("evaluate_image", {
-                    "image_path": gen["path"], "prompt": user_request,
-                }))
+                verdict = await eval_agent.evaluate(
+                    gen["path"], user_request, state.get("scene_plan"))
+                ev, vr = verdict["eval"], verdict["verify"]
                 ctx.add("tool", json.dumps(ev), kind="tool_result")
-                print(f"[agent] eval: clip={ev['clip_score']} style={ev['style_sim']} "
-                      f"aesthetic={ev['aesthetic']} passed={ev['passed']}", flush=True)
+                if vr.get("available"):
+                    oks = sum(1 for c in vr.get("constraints", []) if c.get("ok"))
+                    print(f"[agent:eval] verify: {oks}/{len(vr.get('constraints', []))} "
+                          f"constraints ok", flush=True)
+                    for c in vr.get("failed", []):
+                        print(f"[agent:eval]   FAIL {c['id']}: {c.get('reason', '')}", flush=True)
+                print(f"[agent:eval] clip={ev['clip_score']} style={ev['style_sim']} "
+                      f"style_ok={verdict['style_ok']} "
+                      f"constraints_ok={verdict['constraints_ok']} "
+                      f"passed={verdict['passed']}", flush=True)
 
-                record = {"iteration": i, "image": gen["path"], "prompt": prompt, "eval": ev}
-                if best is None or ev["composite"] > best["eval"]["composite"]:
+                record = {"iteration": i, "image": gen["path"], "prompt": state["prompt"],
+                          "eval": ev, "verify": vr, "score": verdict["composite"],
+                          "passed": verdict["passed"]}
+                if best is None or verdict["composite"] > best["score"]:
                     best = record
 
-                if ev["passed"]:
-                    print("[agent] thresholds met — stopping.\n", flush=True)
+                if verdict["passed"]:
+                    print("[agent] thresholds + constraints met — stopping.\n", flush=True)
                     break
                 if i == max_iters:
                     print("[agent] max iterations reached.\n", flush=True)
                     break
 
-                # 3) Ask the LLM to fix the weakest dimension, then re-apply style.
-                subject = llm.refine_prompt(subject, prompt, ev)
-                reenh = _parse(await session.call_tool(
-                    "enhance_prompt", {"user_request": subject, "style": style}
-                ))
-                prompt, negative = reenh["prompt"], reenh["negative_prompt"]
-                ctx.add("assistant", f"Refined subject -> {subject}")
-                print(f"[agent] refined prompt:\n  {prompt}\n", flush=True)
+                # 3) FEEDBACK — hand the failed eval back to the PromptAgent, which regenerates
+                #    a better prompt (or replans scene structure) before the next render.
+                state = await prompt_agent.revise(state, ev, vr, user_request)
+                if state.get("last_action") == "replan":
+                    print("[agent:prompt] replanned scene structure from failed constraints\n",
+                          flush=True)
+                else:
+                    ctx.add("assistant", f"Refined subject -> {state['subject']}")
+                    print(f"[agent:prompt] refined prompt:\n  {state['prompt']}\n", flush=True)
+
+    # 4) Keep only the correct version: delete every rejected render (PNG + sidecar JSON).
+    if keep_only_best and best is not None:
+        removed = cleanup_outputs(produced, best["image"])
+        if removed:
+            print(f"[agent] cleanup: removed {len(removed)} rejected render(s); "
+                  f"kept {best['image']}", flush=True)
 
     print(f"[agent] context: {ctx.stats()}", flush=True)
     return {"request": user_request, "best": best}
